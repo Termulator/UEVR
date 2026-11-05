@@ -20504,6 +20504,8 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
         pokemon_emerald_is_current_game() && is_ue_5_6_dx12_backend();
     const bool sw_zero_company_ue56_dx12_viewport_adoption =
         sw_zero_company_ue56_is_current_game() && is_ue_5_6_dx12_backend();
+    const bool from_another_world_ue56_dx12_viewport_adoption =
+        from_another_world_ue56_is_current_game() && is_ue_5_6_dx12_backend();
     const bool bodycam_ue554_dx12_viewport_adoption =
         bodycam_ue554_is_current_game() && is_ue_5_5_dx12_backend();
     const bool goweday_viewport_adoption = goweday_ue561_dx12_runtime();
@@ -20517,6 +20519,7 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
         naruto_ue416_dx11_viewport_adoption || dead_island_2_ue425_dx12_viewport_adoption ||
         pokemon_emerald_ue56_dx12_viewport_adoption ||
         sw_zero_company_ue56_dx12_viewport_adoption ||
+        from_another_world_ue56_dx12_viewport_adoption ||
         bodycam_ue554_dx12_viewport_adoption || goweday_viewport_adoption || ffrs_viewport_adoption;
     const auto log_prefix = ffrs_viewport_adoption ? "[FFRS][UE5.6.1][RT]" :
         goweday_viewport_adoption ? "[GoWEDay][UE5.6.1][RT]" : bodycam_ue554_dx12_viewport_adoption
@@ -20533,9 +20536,11 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
                         ? "[PokemonEmerald][UE5.6][RT]"
                         : (sw_zero_company_ue56_dx12_viewport_adoption
                             ? "[SWZeroCompany][UE5.6][RT]"
-                            : (stalker2_ue55_dx12_viewport_observation
-                                ? "[Stalker2][UE5.5][SyncedRT]"
-                                : "[SHf]")))))));
+                            : (from_another_world_ue56_dx12_viewport_adoption
+                                ? "[FromAnotherWorld][UE5.6.1][RT]"
+                                : (stalker2_ue55_dx12_viewport_observation
+                                    ? "[Stalker2][UE5.5][SyncedRT]"
+                                    : "[SHf]"))))))));
     const auto source_name = source != nullptr ? source : "<unknown>";
     const bool everspace2_direct_observation =
         everspace2_is_current_game() && is_ue_5_5_dx12_backend();
@@ -20646,6 +20651,10 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
         sw_zero_company_ue56_dx12_viewport_adoption &&
         source != nullptr &&
         std::strcmp(source, "UGameViewportClient::Draw viewport") == 0;
+    const bool is_from_another_world_viewport_refresh =
+        from_another_world_ue56_dx12_viewport_adoption &&
+        source != nullptr &&
+        std::strcmp(source, "UGameViewportClient::Draw viewport") == 0;
     const bool is_bodycam_viewport_refresh = bodycam_ue554_dx12_viewport_adoption;
     const bool is_stalker2_viewport_refresh = stalker2_ue55_synced_viewport_adoption;
 
@@ -20657,6 +20666,7 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
         !is_dead_island_2_viewport_refresh &&
         !is_pokemon_emerald_viewport_refresh &&
         !is_sw_zero_company_viewport_refresh &&
+        !is_from_another_world_viewport_refresh &&
         !is_goweday_post_draw &&
         !is_ffrs_post_draw &&
         !is_bodycam_viewport_refresh &&
@@ -21078,6 +21088,7 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
         naruto_ue416_dx11_viewport_adoption ||
         dead_island_2_ue425_dx12_viewport_adoption ||
         sw_zero_company_ue56_dx12_viewport_adoption ||
+        from_another_world_ue56_dx12_viewport_adoption ||
         bodycam_ue554_dx12_viewport_adoption ||
         goweday_viewport_adoption || ffrs_viewport_adoption ||
         stalker2_ue55_synced_viewport_adoption)
