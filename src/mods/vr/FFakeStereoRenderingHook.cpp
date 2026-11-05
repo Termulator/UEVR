@@ -6171,6 +6171,11 @@ bool ue56_dx12_try_get_native_resource(FRHITexture2D* texture, const char* sourc
     if (goweday_ue561_dx12_runtime()) {
         return goweday_try_get_native_resource(texture, out_native, out_desc);
     }
+    if (from_another_world_ue56_is_current_game()) {
+        // Route scene, Slate/UI fallback, and provider candidates through the
+        // game's verified, call-free native-resource read.
+        return from_another_world_try_get_native_resource(texture, source, out_native, out_desc);
+    }
     if (out_native != nullptr) {
         *out_native = nullptr;
     }
@@ -7179,6 +7184,10 @@ bool ue55_dx12_try_get_native_resource_direct(
 {
     if (goweday_ue561_dx12_runtime()) {
         return goweday_try_get_native_resource(texture, out_native, out_desc);
+    }
+    if (from_another_world_ue56_is_current_game()) {
+        // Slate UI validation uses the same call-free verified native-resource read.
+        return from_another_world_try_get_native_resource(texture, source, out_native, out_desc);
     }
     if (out_native != nullptr) {
         *out_native = nullptr;
@@ -21306,6 +21315,21 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
                 desc.Width,
                 desc.Height,
                 (uint32_t)desc.Format);
+        }
+    }
+
+    if (from_another_world_ue56_dx12_viewport_adoption) {
+        const auto hmd_width = static_cast<uint64_t>(vr->get_hmd_width());
+        const auto hmd_height = static_cast<uint64_t>(vr->get_hmd_height());
+
+        if (hmd_width != 0 && hmd_height != 0 &&
+            (desc.Width < hmd_width || desc.Height < hmd_height))
+        {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "{} Waiting for an HMD-sized FSceneViewport RT from {}: got {}x{}, need at least {}x{}",
+                log_prefix, source_name, desc.Width, desc.Height, hmd_width, hmd_height);
+            return;
         }
     }
 
