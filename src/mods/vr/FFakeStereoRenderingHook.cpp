@@ -122,6 +122,7 @@
 #include "KtjLHookContracts.hpp"
 #include "KtjLRendererEntry.hpp"
 #include "SWZeroCompanyBinary.hpp"
+#include "FromAnotherWorldRHI.hpp"
 #include "utility/HiFiRushHookMemory.hpp"
 #include "utility/BoundedTextureDiagnostics.hpp"
 
@@ -6055,6 +6056,114 @@ bool goweday_try_get_native_resource(FRHITexture2D* texture, ID3D12Resource** ou
         (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0) { return false; }
     if (out_native) { *out_native = native; }
     if (out_desc) { *out_desc = desc; }
+    return true;
+}
+
+bool from_another_world_ue56_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && uevr::from_another_world::is_executable_path(*exe_path);
+    }();
+
+    return result;
+}
+
+uevr::from_another_world::Memory from_another_world_process_memory() {
+    return {nullptr, [](void*, uintptr_t address, void* out, size_t size) {
+        SIZE_T bytes_read{};
+        return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), out, size, &bytes_read) != FALSE &&
+               bytes_read == size;
+    }};
+}
+
+// From Another World (UE 5.6.1-44394996): FRHITexture vtable slot 5 is a null stub and the
+// real accessor is slot 7, whose fast path is [[this+0x178]+0x20]. The accessor bytes are
+// verified before the two offsets are trusted, and no game code is executed.
+bool from_another_world_try_get_native_resource(
+    FRHITexture2D* texture,
+    const char* source,
+    ID3D12Resource** out_native,
+    D3D12_RESOURCE_DESC* out_desc)
+{
+    if (out_native != nullptr) {
+        *out_native = nullptr;
+    }
+
+    if (out_desc != nullptr) {
+        *out_desc = {};
+    }
+
+    if (!from_another_world_ue56_is_current_game() || !is_ue_5_6_dx12_backend() || texture == nullptr) {
+        return false;
+    }
+
+    const auto memory = from_another_world_process_memory();
+    const auto address = uevr::from_another_world::native_resource_address(memory, reinterpret_cast<uintptr_t>(texture));
+
+    if (address == 0) {
+        SPDLOG_INFO_EVERY_N_SEC(2,
+            "[FromAnotherWorld][UE5.6.1][RT] {} candidate has no validated native resource yet (unknown build or target not ready): tex={:x}",
+            source != nullptr ? source : "<unknown>", reinterpret_cast<uintptr_t>(texture));
+        return false;
+    }
+
+    // The native object must be a real D3D12 COM object: its vtable has to live in D3D12Core.dll or d3d12.dll.
+    uintptr_t native_vtable{};
+    const auto native_module = memory.read_value(address, native_vtable) && native_vtable != 0
+        ? utility::get_module_within(reinterpret_cast<void*>(native_vtable)).value_or(nullptr)
+        : nullptr;
+
+    if (native_module == nullptr ||
+        (native_module != GetModuleHandleW(L"D3D12Core.dll") && native_module != GetModuleHandleW(L"d3d12.dll")))
+    {
+        SPDLOG_WARNING_EVERY_N_SEC(2,
+            "[FromAnotherWorld][UE5.6.1][RT] Rejected native resource {:x}: its vtable {:x} is not inside D3D12Core.dll/d3d12.dll",
+            address, native_vtable);
+        return false;
+    }
+
+    auto* native = reinterpret_cast<ID3D12Resource*>(address);
+    D3D12_RESOURCE_DESC desc{};
+    ID3D12Device4* raw_device{};
+
+    if (!is_probable_d3d_native_resource(native) ||
+        !get_d3d12_resource_desc_guarded(native, desc) ||
+        !get_d3d12_resource_device_guarded(native, &raw_device))
+    {
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Device4> device;
+    device.Attach(raw_device);
+
+    const auto& hook = g_framework->get_d3d12_hook();
+    if (hook == nullptr || hook->get_device() == nullptr || device.Get() != hook->get_device() ||
+        desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width == 0 || desc.Width > 65536 ||
+        desc.Height == 0 || desc.Height > 65536 || desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
+        desc.SampleDesc.Count != 1 || desc.Format == DXGI_FORMAT_UNKNOWN ||
+        (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
+        (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0)
+    {
+        SPDLOG_WARNING_EVERY_N_SEC(2,
+            "[FromAnotherWorld][UE5.6.1][RT] Rejected {} resource: native={:x} size={}x{} dim={} array={} mips={} samples={} fmt={} flags=0x{:x}",
+            source != nullptr ? source : "<unknown>", address, desc.Width, desc.Height,
+            static_cast<uint32_t>(desc.Dimension), desc.DepthOrArraySize, desc.MipLevels, desc.SampleDesc.Count,
+            static_cast<uint32_t>(desc.Format), static_cast<uint32_t>(desc.Flags));
+        return false;
+    }
+
+    SPDLOG_INFO_ONCE(
+        "[FromAnotherWorld][UE5.6.1][RT] Validated scene target via [[tex+0x178]+0x20]: tex={:x} native={:x} [{}x{} fmt={}]",
+        reinterpret_cast<uintptr_t>(texture), address, desc.Width, desc.Height, static_cast<uint32_t>(desc.Format));
+
+    if (out_native != nullptr) {
+        *out_native = native;
+    }
+
+    if (out_desc != nullptr) {
+        *out_desc = desc;
+    }
+
     return true;
 }
 
@@ -20840,12 +20949,17 @@ void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FView
         const bool is_sw_zero_company_viewport_bootstrap =
             sw_zero_company_ue56_is_current_game() &&
             is_known_viewport_source;
+        const bool is_from_another_world_viewport_bootstrap =
+            from_another_world_ue56_is_current_game() &&
+            is_known_viewport_source;
         const bool discovered =
             is_pokemon_emerald_viewport_bootstrap
                 ? pokemon_emerald_ue56_try_bootstrap_scene_target(candidate, source, &native_resource, &desc)
                 : is_sw_zero_company_viewport_bootstrap
                     ? sw_zero_company_ue56_try_bootstrap_scene_target(candidate, source, &native_resource, &desc)
-                    : ue56_dx12_try_get_native_resource(candidate, source, &native_resource, &desc);
+                    : is_from_another_world_viewport_bootstrap
+                        ? from_another_world_try_get_native_resource(candidate, source, &native_resource, &desc)
+                        : ue56_dx12_try_get_native_resource(candidate, source, &native_resource, &desc);
 
         if (!discovered) {            SPDLOG_WARNING_EVERY_N_SEC(2, "[UE5.6][RT] Failing closed for FSceneViewport render target from {}; waiting for D3D12 texture/backbuffer hooks", source);
             return;

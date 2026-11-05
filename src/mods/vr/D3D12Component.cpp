@@ -34,6 +34,7 @@
 #include "D3D12Component.hpp"
 #include "GalacticRacerRenderTargets.hpp"
 #include "PhantomBladeZeroNative.hpp"
+#include "FromAnotherWorldRHI.hpp"
 
 //#define AFR_DEPTH_TEMP_DISABLED
 
@@ -367,6 +368,15 @@ bool is_pbz_ue574_dx12_current_game() {
     return exact_game;
 }
 
+bool is_from_another_world_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && uevr::from_another_world::is_executable_path(*exe_path);
+    }();
+
+    return result;
+}
+
 Microsoft::WRL::ComPtr<ID3D12Resource> acquire_scene_target_resource(
     VR* vr,
     const char* consumer,
@@ -568,6 +578,20 @@ Microsoft::WRL::ComPtr<ID3D12Resource> acquire_scene_target_resource(
     const auto ue4_texture = rtm->get_render_target();
     if (ue4_texture == nullptr) {
         return nullptr;
+    }
+
+    if (is_from_another_world_current_game()) {
+        // This game's FRHITexture vtable slot 5 is a null stub, so the generic
+        // get_native_resource() cannot be trusted. Read the verified layout instead
+        // ([[tex+0x178]+0x20]); this executes no game code and fails closed to null.
+        const uevr::from_another_world::Memory memory{nullptr, [](void*, uintptr_t address, void* out, size_t size) {
+            SIZE_T bytes_read{};
+            return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), out, size, &bytes_read) != FALSE &&
+                   bytes_read == size;
+        }};
+
+        return reinterpret_cast<ID3D12Resource*>(
+            uevr::from_another_world::native_resource_address(memory, reinterpret_cast<uintptr_t>(ue4_texture)));
     }
 
     return (ID3D12Resource*)ue4_texture->get_native_resource();
