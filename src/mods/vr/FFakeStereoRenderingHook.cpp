@@ -123,6 +123,7 @@
 #include "KtjLRendererEntry.hpp"
 #include "SWZeroCompanyBinary.hpp"
 #include "FromAnotherWorldRHI.hpp"
+#include "FromAnotherWorldUI.hpp"
 #include "utility/HiFiRushHookMemory.hpp"
 #include "utility/BoundedTextureDiagnostics.hpp"
 
@@ -39437,10 +39438,16 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
                 uevr::post_init::module_window(address, reinterpret_cast<uintptr_t>(*module),
                     reinterpret_cast<uintptr_t>(*module) + *length, size, executable).size() == size;
         };
+        const bool scope_variant = proof.variant == uevr::from_another_world_ui::variant_id;
+        const bool destroy_ok = proof.destroy != 0 && (scope_variant
+            ? module_readable(proof.destroy, uevr::from_another_world_ui::destroy_fingerprint.size(), true) &&
+              std::memcmp(reinterpret_cast<const void*>(proof.destroy),
+                  uevr::from_another_world_ui::destroy_fingerprint.data(),
+                  uevr::from_another_world_ui::destroy_fingerprint.size()) == 0
+            : module_readable(proof.destroy, destroy_entry.size(), true) &&
+              std::memcmp(reinterpret_cast<const void*>(proof.destroy), destroy_entry.data(), destroy_entry.size()) == 0);
         if (rtm->is_pre_texture_call_e8 || !rtm->allocate_texture_called ||
-            static_cast<uint32_t>(ctx.rsi) != UINT32_MAX || !proof.destroy ||
-            !module_readable(proof.destroy, destroy_entry.size(), true) ||
-            std::memcmp(reinterpret_cast<const void*>(proof.destroy), destroy_entry.data(), destroy_entry.size()) != 0 ||
+            (!scope_variant && static_cast<uint32_t>(ctx.rsi) != UINT32_MAX) || !destroy_ok ||
             rtm->texture_create_insn_bytes.size() != proof.length ||
             std::memcmp(rtm->texture_create_insn_bytes.data(), proof.bytes.data(), proof.length) != 0 ||
             !module_readable(proof.receiver_cell, sizeof(uintptr_t), false) ||
@@ -44608,9 +44615,76 @@ bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return
                                 fn, recovered->callsite, recovered->vtable_offset);
                             return false;
                         } else if (is_ue56_stack_scope_constructor_call(ip)) {
-                            // This UE5.6 LLM/scope constructor sits immediately
-                            // after AllocateRenderTargetTexture. Hooking it with
-                            // the texture-create ABI corrupts the render thread.
+                            if (from_another_world_ue56_is_current_game() &&
+                                !uevr::from_another_world_ui::disabled_by_environment())
+                            {
+                                // From Another World wraps the RHI allocation in two stack scope
+                                // objects. Recover the real allocator call (byte-exact, with the
+                                // release helper and FRHIResource::Destroy verified) instead of
+                                // hooking the scope constructor. Anything unexpected fails closed
+                                // through the original path below.
+                                const auto module = utility::get_module_within(ip);
+                                const auto module_size = module ? utility::get_module_size(*module) : std::nullopt;
+                                const auto start = static_cast<uintptr_t>(ip) + decoded->Length;
+                                const auto code = module && module_size
+                                    ? uevr::post_init::module_window(start, reinterpret_cast<uintptr_t>(*module),
+                                        reinterpret_cast<uintptr_t>(*module) + *module_size, 0x300, true)
+                                    : std::span<const uint8_t>{};
+                                const auto faw_proof = uevr::from_another_world_ui::find_allocator(
+                                    code, start, from_another_world_process_memory());
+
+                                if (faw_proof) {
+                                    uevr::buffered_rt::TextureCall recovered{};
+                                    recovered.callsite = faw_proof->callsite;
+                                    recovered.receiver_cell = faw_proof->receiver_cell;
+                                    recovered.command_list = faw_proof->command_list;
+                                    recovered.output = uevr::buffered_rt::StackCell{NDR_RBP, faw_proof->output_displacement};
+                                    recovered.vtable_offset = faw_proof->vtable_offset;
+                                    recovered.length = faw_proof->length;
+                                    recovered.bytes = faw_proof->bytes;
+                                    recovered.destroy = faw_proof->destroy;
+                                    recovered.variant = uevr::from_another_world_ui::variant_id;
+
+                                    auto pre = safetyhook::MidHook::create(reinterpret_cast<void*>(recovered.callsite),
+                                        +[](safetyhook::Context& context) {
+                                            if (g_hook->get_render_target_manager()->buffered_rt_texture_call.load(std::memory_order_acquire)) {
+                                                VRRenderTargetManager::pre_texture_hook_callback(context, false);
+                                            }
+                                        });
+                                    if (!pre || pre->original_bytes().size() != recovered.length) {
+                                        this->legacy_texture_replay_failed_closed.store(true, std::memory_order_release);
+                                        this->set_up_texture_hook = true;
+                                        SPDLOG_WARN_ONCE("[FromAnotherWorld][BufferedRT] Allocator pre-hook failed or overlapped its output hook");
+                                        return false;
+                                    }
+                                    auto post = safetyhook::MidHook::create(reinterpret_cast<void*>(recovered.callsite + recovered.length),
+                                        +[](safetyhook::Context& context) {
+                                            if (g_hook->get_render_target_manager()->buffered_rt_texture_call.load(std::memory_order_acquire)) {
+                                                VRRenderTargetManager::texture_hook_callback(context, false);
+                                            }
+                                        });
+                                    if (!post) {
+                                        this->legacy_texture_replay_failed_closed.store(true, std::memory_order_release);
+                                        this->set_up_texture_hook = true;
+                                        SPDLOG_WARN_ONCE("[FromAnotherWorld][BufferedRT] Allocator post-hook installation failed; rolling back pre-hook");
+                                        return false;
+                                    }
+                                    this->texture_create_insn_bytes.assign(recovered.bytes.begin(), recovered.bytes.begin() + recovered.length);
+                                    this->is_pre_texture_call_e8 = false;
+                                    this->buffered_rt_texture_call.store(std::make_shared<const uevr::buffered_rt::TextureCall>(recovered),
+                                        std::memory_order_release);
+                                    this->pre_texture_hook = std::move(*pre);
+                                    this->texture_hook = std::move(*post);
+                                    this->set_up_texture_hook = true;
+                                    SPDLOG_INFO("[FromAnotherWorld][BufferedRT] Rejected scope constructor {:x}; validated RHI allocator call {:x} slot={:x} release={:x} destroy={:x}",
+                                        fn, recovered.callsite, recovered.vtable_offset, faw_proof->release_helper, recovered.destroy);
+                                    return false;
+                                }
+
+                                SPDLOG_WARN_ONCE("[FromAnotherWorld][BufferedRT] Scope constructor rejected and no validated allocator shape followed; UI replay stays disabled");
+                            }
+                            // All other UE5.6 games, and FAW builds that do not match the
+                            // validated allocator fingerprint, retain the original fail-closed path.
                             this->legacy_texture_replay_failed_closed.store(true, std::memory_order_release);
                             this->set_up_texture_hook = true;
                             SPDLOG_WARN_ONCE(
