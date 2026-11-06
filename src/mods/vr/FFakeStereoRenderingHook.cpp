@@ -6608,6 +6608,7 @@ bool supports_ue55_dedicated_ui_target_for_current_game() {
             everwind_is_current_game() ||
             pokemon_emerald_is_current_game() ||
             sw_zero_company_ue56_is_current_game() ||
+            from_another_world_ue56_is_current_game() ||
             bodycam_ue554_is_current_game() ||
             is_deadzone_ue56_executable()) &&
         g_framework != nullptr &&
@@ -6633,6 +6634,7 @@ bool should_preserve_promoted_ue55_slate_target() {
         mechwarrior_clans_is_current_game() ||
         supports_borderlands4_ue554_dedicated_ui_target() ||
         supports_glory_to_the_heroes_ue554_dedicated_ui_target() ||
+        from_another_world_ue56_is_current_game() ||
         everwind_is_current_game() ||
         pokemon_emerald_is_current_game() ||
         is_deadzone_ue56_executable();
