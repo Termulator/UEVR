@@ -27,6 +27,7 @@ struct TextureCall {
     uint8_t length{};
     std::array<uint8_t, 15> bytes{};
     uintptr_t destroy{};
+    uint8_t variant{};
 };
 
 inline bool is_name_constructor(uintptr_t target, uintptr_t constructor) {
